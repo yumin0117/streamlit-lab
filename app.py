@@ -570,6 +570,8 @@ if "debate_count" not in st.session_state:
 # 제목
 # ============================================================
 
+st.write("2601110285 김유민")
+
 st.title("⚖️ AI 토론장")
 
 st.write(
