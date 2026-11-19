@@ -250,18 +250,24 @@ ingredient_text = st.text_area("추천에 사용할 재료", key="recipe_ingredi
                                placeholder="예: 달걀, 두부, 양파, 당근", height=90,
                                help="쉼표나 줄바꿈으로 나눠 주세요. 불확실하게 탐지된 식품은 자동으로 포함하지 않습니다.")
 ingredients = list(dict.fromkeys(name.strip() for name in re.split(r"[,\n]+", ingredient_text) if name.strip()))
-servings = st.number_input("몇 인분을 만들까요?", min_value=1, max_value=6, value=2, step=1)
+cuisine_col, servings_col = st.columns([2, 1])
+with cuisine_col:
+    cuisine = st.selectbox("요리 종류", ["상관없음", "한식", "중식", "양식", "일식"], key="recipe_cuisine",
+                           help="선택한 종류와 보유 재료에 맞는 음식을 추천합니다.")
+with servings_col:
+    servings = st.number_input("몇 인분을 만들까요?", min_value=1, max_value=6, value=2, step=1)
 with st.expander("집에 있다고 가정하는 기본 양념", expanded=True):
     pantry = st.multiselect("사용할 수 있는 양념", DEFAULT_PANTRY, default=DEFAULT_PANTRY,
                             help="없는 양념은 빼 주세요. 밥·면·밀가루 등은 위의 재료 칸에 직접 적어 주세요.")
     st.caption("설탕·간장·소금·고추장·고춧가루 등 선택한 양념은 이미 있다고 가정합니다.")
 
-recipe_key = (tuple(ingredients), int(servings), tuple(pantry), API_URL)
+recipe_key = (tuple(ingredients), int(servings), tuple(pantry), cuisine, API_URL)
 if st.session_state.get("recipe_result_key") != recipe_key:
     st.session_state.pop("recipe_result", None)
 if st.button("🍳 이 재료로 요리 추천받기", type="primary", disabled=not ingredients, key="recipe_go"):
     with st.spinner("보유 재료로 만들 음식과 조리 순서를 정리하고 있습니다…"):
-        recommended = call_api({"ingredients": ingredients, "servings": int(servings), "pantry": pantry}, path="/recipes")
+        recommended = call_api({"ingredients": ingredients, "servings": int(servings),
+                                "pantry": pantry, "cuisine": cuisine}, path="/recipes")
     if recommended is not None:
         st.session_state["recipe_result"] = recommended
         st.session_state["recipe_result_key"] = recipe_key
@@ -276,7 +282,7 @@ if recommended is not None:
         for tab, dish in zip(recipe_tabs, dishes):
             with tab:
                 st.subheader(dish["name"])
-                st.caption(f'{recommended["servings"]}인분 · 약 {dish["minutes"]}분')
+                st.caption(f'{recommended.get("cuisine", cuisine)} · {recommended["servings"]}인분 · 약 {dish["minutes"]}분')
                 st.write(dish["description"])
                 ingredient_col, steps_col = st.columns([1, 2], gap="large")
                 with ingredient_col:
@@ -290,7 +296,7 @@ if recommended is not None:
                         st.write(f"{number}. {step}")
                     if dish.get("tip"):
                         st.success(f'조리 팁 · {dish["tip"]}')
-        recipe_text = []
+        recipe_text = ["요리 종류: " + recommended.get("cuisine", cuisine), ""]
         for dish in dishes:
             recipe_text.extend([dish["name"], f'{recommended["servings"]}인분 / 약 {dish["minutes"]}분',
                                 "재료: " + ", ".join(f'{i["name"]} {i["amount"]}' for i in dish["ingredients"])])
