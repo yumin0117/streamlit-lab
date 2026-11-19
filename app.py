@@ -87,8 +87,12 @@ def call_api(body, path="/detect"):
             detail = "분석 서버를 업데이트하는 중입니다. 잠시 뒤 다시 시도해 주세요."
         st.error(f"{detail} (상태 {response.status_code})")
         return None
-    result_field = "recipes" if path == "/recipes" else "detections"
-    if not isinstance(data, dict) or not isinstance(data.get(result_field), list):
+    if path == "/recipe-by-name":
+        valid_result = isinstance(data, dict) and "recipe" in data and (data["recipe"] is None or isinstance(data["recipe"], dict))
+    else:
+        result_field = "recipes" if path == "/recipes" else "detections"
+        valid_result = isinstance(data, dict) and isinstance(data.get(result_field), list)
+    if not valid_result:
         st.error("분석 결과 형식이 올바르지 않습니다. 다시 분석해 주세요.")
         return None
     return data
@@ -309,6 +313,57 @@ if recommended is not None:
         st.warning("현재 재료로 추천할 수 있는 요리가 없습니다. 보유한 식재료를 더 입력해 주세요.")
 elif not ingredients:
     st.caption("사진을 분석하거나 재료를 직접 입력하면 요리를 추천받을 수 있습니다.")
+
+st.divider()
+st.subheader("4. 음식 이름으로 조리법 알아보기")
+st.write("만들고 싶은 음식 이름을 입력하면 필요한 재료와 분량, 만드는 순서를 알려드려요.")
+st.caption("사진 없이도 사용할 수 있어요. 기본 양념을 포함해 요리에 필요한 전체 재료를 안내합니다.")
+dish_name_col, dish_servings_col = st.columns([2, 1])
+with dish_name_col:
+    dish_name = st.text_input("음식 이름", placeholder="예: 김치찌개, 오므라이스, 마파두부",
+                              max_chars=80, key="dish_lookup_name").strip()
+with dish_servings_col:
+    dish_servings = st.number_input("조리법 인분", min_value=1, max_value=6, value=2, step=1,
+                                    key="dish_lookup_servings")
+
+dish_key = (dish_name, int(dish_servings), API_URL)
+if st.session_state.get("dish_result_key") != dish_key:
+    st.session_state.pop("dish_result", None)
+if st.button("📖 조리법 알아보기", type="primary", disabled=not dish_name, key="dish_lookup_go"):
+    with st.spinner("필요한 재료와 만드는 순서를 정리하고 있습니다…"):
+        dish_result = call_api({"dish_name": dish_name, "servings": int(dish_servings)}, path="/recipe-by-name")
+    if dish_result is not None:
+        st.session_state["dish_result"] = dish_result
+        st.session_state["dish_result_key"] = dish_key
+
+dish_result = st.session_state.get("dish_result")
+if dish_result is not None:
+    dish = dish_result["recipe"]
+    if dish is None:
+        st.info(dish_result.get("note") or "음식 이름을 확인하고 다시 입력해 주세요.")
+    else:
+        st.subheader(dish["name"])
+        st.caption(f'{dish_result["servings"]}인분 · 약 {dish["minutes"]}분')
+        st.write(dish["description"])
+        dish_ingredients_col, dish_steps_col = st.columns([1, 2], gap="large")
+        with dish_ingredients_col:
+            st.markdown("**필요한 재료와 분량**")
+            st.dataframe([{"재료·양념": item["name"], "분량": item["amount"]} for item in dish["ingredients"]],
+                         hide_index=True, width="stretch")
+        with dish_steps_col:
+            st.markdown("**만드는 순서**")
+            for number, step in enumerate(dish["steps"], 1):
+                st.write(f"{number}. {step}")
+            if dish.get("tip"):
+                st.success(f'조리 팁 · {dish["tip"]}')
+        if dish_result.get("note"):
+            st.info(dish_result["note"])
+        dish_text = [dish["name"], f'{dish_result["servings"]}인분 / 약 {dish["minutes"]}분', dish["description"],
+                     "재료: " + ", ".join(f'{item["name"]} {item["amount"]}' for item in dish["ingredients"])]
+        dish_text.extend(f"{number}. {step}" for number, step in enumerate(dish["steps"], 1))
+        dish_text.extend(["조리 팁: " + dish.get("tip", ""), dish_result.get("note", "")])
+        st.download_button("📥 이 조리법 저장", "\n".join(dish_text).encode("utf-8-sig"),
+                           file_name="recipe_by_name.txt", mime="text/plain")
 
 st.divider()
 st.caption("식품의 종류와 위치를 찾는 AI 도우미입니다. 사진만으로 유통기한·신선도·섭취 안전성을 판단할 수 없습니다.")
