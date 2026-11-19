@@ -6,6 +6,7 @@ import html
 import io
 import json
 import os
+import re
 import warnings
 from collections import Counter
 
@@ -15,6 +16,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 MAX_SIDE = 1280
 MAX_UPLOAD = 20 * 1024 * 1024
+DEFAULT_PANTRY = ["설탕", "간장", "소금", "고추장", "고춧가루", "후추", "식용유", "참기름", "식초", "다진 마늘", "물"]
 CATEGORIES = ["전체", "과일", "채소", "유제품·달걀", "육류·생선", "음료·기타"]
 COLORS = {"과일": "#e29024", "채소": "#219b63", "유제품·달걀": "#437ac5",
           "육류·생선": "#d05a71", "음료·기타": "#8764b5"}
@@ -42,7 +44,7 @@ div.stButton > button[kind="primary"] { background: #207a50; border-color: #207a
 """, unsafe_allow_html=True)
 st.caption("FRIDGE DETECTIVE · 우리 집 식재료 찾기")
 st.title("🧊 AI 냉장고 탐정")
-st.write("냉장고 속에 무엇이 있을까요? 사진 한 장으로 식품의 이름과 개수를 확인해 보세요.")
+st.write("사진으로 냉장고 속 재료를 찾고, 그 재료로 만들 음식과 조리 순서까지 알아보세요.")
 
 
 def prepare_photo(raw):
@@ -62,12 +64,12 @@ def prepare_photo(raw):
     return data, image.width, image.height
 
 
-def call_api(body):
+def call_api(body, path="/detect"):
     try:
-        response = requests.post(f"{API_URL}/detect", json=body,
+        response = requests.post(f"{API_URL}{path}", json=body,
                                  headers={"X-Access-Code": ACCESS_CODE}, timeout=(10, 115))
     except requests.Timeout:
-        st.error("분석 시간이 초과되었습니다. 사진을 작게 하거나 잠시 뒤 다시 시도해 주세요.")
+        st.error("요청 시간이 초과되었습니다. 잠시 뒤 다시 시도해 주세요.")
         return None
     except requests.RequestException:
         st.error("분석 서버에 연결할 수 없습니다. 잠시 뒤 다시 시도해 주세요.")
@@ -80,12 +82,13 @@ def call_api(body):
     if not response.ok:
         detail = data.get("detail", "서버 오류가 발생했습니다.") if isinstance(data, dict) else ""
         if isinstance(detail, list):
-            detail = "사진 또는 분석 설정이 올바르지 않습니다. 입력값을 확인해 주세요."
+            detail = "입력한 내용이나 설정이 올바르지 않습니다. 재료 이름과 입력값을 확인해 주세요."
         if response.status_code == 404:
             detail = "분석 서버를 업데이트하는 중입니다. 잠시 뒤 다시 시도해 주세요."
         st.error(f"{detail} (상태 {response.status_code})")
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("detections"), list):
+    result_field = "recipes" if path == "/recipes" else "detections"
+    if not isinstance(data, dict) or not isinstance(data.get(result_field), list):
         st.error("분석 결과 형식이 올바르지 않습니다. 다시 분석해 주세요.")
         return None
     return data
@@ -174,6 +177,7 @@ with left:
         if result is not None:
             st.session_state["fridge_result"] = result
             st.session_state["fridge_result_key"] = key
+            st.session_state.pop("recipe_source", None)
 
 result = st.session_state.get("fridge_result")
 candidates = [r for r in result["detections"] if r["confidence"] >= threshold / 100] if result else []
@@ -230,6 +234,75 @@ with right:
         st.download_button("📄 전체 분석 JSON", json.dumps(export, ensure_ascii=False, indent=2),
                            file_name="fridge_result.json", mime="application/json")
         st.caption(f'분석 완료 · 사용 토큰 {result.get("tokens") or "정보 없음"}')
+
+st.divider()
+st.subheader("3. 이 재료로 무엇을 만들까요?")
+st.write("찾은 재료를 확인하고 요리를 추천받으세요. 잘못 인식한 이름을 고치거나 집에 있는 재료를 추가할 수 있어요.")
+
+recipe_source = (st.session_state.get("fridge_result_key"), tuple(sorted(counts)))
+if st.session_state.get("recipe_source") != recipe_source:
+    st.session_state["recipe_ingredients"] = ", ".join(sorted(counts))
+    st.session_state["recipe_source"] = recipe_source
+    st.session_state.pop("recipe_result", None)
+    st.session_state.pop("recipe_result_key", None)
+
+ingredient_text = st.text_area("추천에 사용할 재료", key="recipe_ingredients",
+                               placeholder="예: 달걀, 두부, 양파, 당근", height=90,
+                               help="쉼표나 줄바꿈으로 나눠 주세요. 불확실하게 탐지된 식품은 자동으로 포함하지 않습니다.")
+ingredients = list(dict.fromkeys(name.strip() for name in re.split(r"[,\n]+", ingredient_text) if name.strip()))
+servings = st.number_input("몇 인분을 만들까요?", min_value=1, max_value=6, value=2, step=1)
+with st.expander("집에 있다고 가정하는 기본 양념", expanded=True):
+    pantry = st.multiselect("사용할 수 있는 양념", DEFAULT_PANTRY, default=DEFAULT_PANTRY,
+                            help="없는 양념은 빼 주세요. 밥·면·밀가루 등은 위의 재료 칸에 직접 적어 주세요.")
+    st.caption("설탕·간장·소금·고추장·고춧가루 등 선택한 양념은 이미 있다고 가정합니다.")
+
+recipe_key = (tuple(ingredients), int(servings), tuple(pantry), API_URL)
+if st.session_state.get("recipe_result_key") != recipe_key:
+    st.session_state.pop("recipe_result", None)
+if st.button("🍳 이 재료로 요리 추천받기", type="primary", disabled=not ingredients, key="recipe_go"):
+    with st.spinner("보유 재료로 만들 음식과 조리 순서를 정리하고 있습니다…"):
+        recommended = call_api({"ingredients": ingredients, "servings": int(servings), "pantry": pantry}, path="/recipes")
+    if recommended is not None:
+        st.session_state["recipe_result"] = recommended
+        st.session_state["recipe_result_key"] = recipe_key
+
+recommended = st.session_state.get("recipe_result")
+if recommended is not None:
+    if recommended.get("note"):
+        st.info(recommended["note"])
+    dishes = recommended["recipes"]
+    if dishes:
+        recipe_tabs = st.tabs([dish["name"] for dish in dishes])
+        for tab, dish in zip(recipe_tabs, dishes):
+            with tab:
+                st.subheader(dish["name"])
+                st.caption(f'{recommended["servings"]}인분 · 약 {dish["minutes"]}분')
+                st.write(dish["description"])
+                ingredient_col, steps_col = st.columns([1, 2], gap="large")
+                with ingredient_col:
+                    st.markdown("**사용할 재료와 분량**")
+                    for item in dish["ingredients"]:
+                        kind = "기본 양념" if item["name"] in pantry and item["name"] not in ingredients else "보유 재료"
+                        st.write(f'• {item["name"]} — {item["amount"]} ({kind})')
+                with steps_col:
+                    st.markdown("**만드는 순서**")
+                    for number, step in enumerate(dish["steps"], 1):
+                        st.write(f"{number}. {step}")
+                    if dish.get("tip"):
+                        st.success(f'조리 팁 · {dish["tip"]}')
+        recipe_text = []
+        for dish in dishes:
+            recipe_text.extend([dish["name"], f'{recommended["servings"]}인분 / 약 {dish["minutes"]}분',
+                                "재료: " + ", ".join(f'{i["name"]} {i["amount"]}' for i in dish["ingredients"])])
+            recipe_text.extend(f"{number}. {step}" for number, step in enumerate(dish["steps"], 1))
+            recipe_text.extend(["조리 팁: " + dish.get("tip", ""), ""])
+        recipe_text.append(recommended.get("note", ""))
+        st.download_button("📥 추천 요리와 만드는 순서 저장", "\n".join(recipe_text).encode("utf-8-sig"),
+                           file_name="fridge_recipes.txt", mime="text/plain")
+    else:
+        st.warning("현재 재료로 추천할 수 있는 요리가 없습니다. 보유한 식재료를 더 입력해 주세요.")
+elif not ingredients:
+    st.caption("사진을 분석하거나 재료를 직접 입력하면 요리를 추천받을 수 있습니다.")
 
 st.divider()
 st.caption("식품의 종류와 위치를 찾는 AI 도우미입니다. 사진만으로 유통기한·신선도·섭취 안전성을 판단할 수 없습니다.")
